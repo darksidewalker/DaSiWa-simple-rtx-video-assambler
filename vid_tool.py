@@ -9,7 +9,7 @@ from PySide6.QtCore import QUrl, Qt
 class VideoTool(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RTX 4070 Precision Assembler (v7)")
+        self.setWindowTitle("DaSiWa-simple-rtx-video-merger")
         self.resize(900, 750)
         self.setAcceptDrops(True)
         self.files = []
