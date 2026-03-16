@@ -9,7 +9,7 @@ from PySide6.QtCore import QUrl, Qt
 class VideoTool(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RTX 4070 Precision Assembler (v10)")
+        self.setWindowTitle("aSiWa-simple-rtx-video-assambler")
         self.resize(900, 750)
         self.setAcceptDrops(True)
         self.files = []
@@ -61,6 +61,11 @@ class VideoTool(QMainWindow):
         self.cq_spin.setRange(1, 51)
         self.cq_spin.setValue(30)
         row2.addWidget(self.cq_spin)
+        row2.addWidget(QLabel("Font Size:"))
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(10, 100)
+        self.font_spin.setValue(24)
+        row2.addWidget(self.font_spin)
         row2.addWidget(QLabel("Preset:"))
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(["p1", "p2", "p3", "p4", "p5", "p6", "p7"])
@@ -156,7 +161,7 @@ class VideoTool(QMainWindow):
         for i, f in enumerate(self.files):
             inputs += f"-hwaccel cuda -i \"{f}\" "
             fname = os.path.splitext(os.path.basename(f))[0]
-            f_size = max(18, scaled_h // 22)
+            f_size = self.font_spin.value()
             # Force EVERY video to the exact same size
             filters.append(f"[{i}:v]scale={scaled_w}:{scaled_h},setsar=1,drawtext=text='{fname}':fontcolor=white:fontsize={f_size}:box=1:boxcolor=black@0.6:x=12:y=12[v{i}]")
 
