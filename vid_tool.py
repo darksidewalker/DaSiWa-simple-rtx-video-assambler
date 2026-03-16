@@ -82,7 +82,7 @@ class VideoTool(QMainWindow):
         row2.addWidget(QLabel("Font Size:"))
         self.font_spin = QSpinBox()
         self.font_spin.setRange(10, 200)
-        self.font_spin.setValue(48)
+        self.font_spin.setValue(32)
         row2.addWidget(self.font_spin)
         
         row2.addWidget(QLabel("NVENC Preset:"))
