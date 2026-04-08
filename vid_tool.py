@@ -127,6 +127,11 @@ class VideoTool(QMainWindow):
         settings_grid.addLayout(row3)
         layout.addLayout(settings_grid)
 
+        self.resolution_info_label = QLabel("")
+        self.resolution_info_label.setStyleSheet("color: #cccccc; padding: 4px 0;")
+        self.resolution_info_label.setWordWrap(True)
+        layout.addWidget(self.resolution_info_label)
+
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setStyleSheet("background-color: #0a0a0a; color: #00ff41; font-family: 'Courier New';")
@@ -147,6 +152,15 @@ class VideoTool(QMainWindow):
         action_hbox.addWidget(self.open_folder_btn)
         action_hbox.addWidget(self.copy_btn)
         layout.addLayout(action_hbox)
+
+        self.res_combo.currentTextChanged.connect(self.update_resolution_preview)
+        self.layout_combo.currentTextChanged.connect(self.update_resolution_preview)
+        self.aspect_combo.currentTextChanged.connect(self.update_resolution_preview)
+        self.text_mode_combo.currentTextChanged.connect(self.update_resolution_preview)
+        self.font_spin.valueChanged.connect(self.update_resolution_preview)
+        self.file_list.model().rowsInserted.connect(lambda *args: self.update_resolution_preview())
+        self.file_list.model().rowsRemoved.connect(lambda *args: self.update_resolution_preview())
+        self.update_resolution_preview()
 
     def reorder_item(self, direction):
         curr_row = self.file_list.currentRow()
@@ -228,6 +242,54 @@ class VideoTool(QMainWindow):
         )
         return "\\n".join(wrapped) if wrapped else text
 
+    def get_layout_metrics(self):
+        aspect_map = {
+            "9:16 (Portrait)": (9, 16),
+            "4:5 (Portrait)": (4, 5),
+            "1376:1760 (Old)": (1376, 1760),
+        }
+
+        target_h = self.force_even(self.res_combo.currentText())
+        num = max(len(self.files), 1)
+        mode = self.layout_combo.currentText()
+        rows = 1 if mode == "Single Row" else math.ceil(num / 2)
+        cols_per_row = num if mode == "Single Row" else 2
+
+        tile_h = self.force_even(target_h / rows)
+        ar_w, ar_h = aspect_map[self.aspect_combo.currentText()]
+        tile_w = self.force_even(tile_h * (ar_w / ar_h))
+
+        font_size = self.font_spin.value()
+        text_mode = self.text_mode_combo.currentText()
+        header_h = self.force_even(max(font_size * 2 + 20, 36)) if text_mode == "Top of Video" else 0
+        box_h = tile_h + header_h
+
+        canvas_w = tile_w * cols_per_row
+        canvas_h = box_h * rows
+
+        if mode == "Grid (Max 2 Cols)" and len(self.files) > 0:
+            canvas_w = tile_w * min(2, len(self.files))
+
+        return {
+            "rows": rows,
+            "cols_per_row": cols_per_row,
+            "tile_w": tile_w,
+            "tile_h": tile_h,
+            "header_h": header_h,
+            "box_h": box_h,
+            "canvas_w": canvas_w,
+            "canvas_h": canvas_h,
+        }
+
+    def update_resolution_preview(self):
+        m = self.get_layout_metrics()
+        header_text = f" + {m['header_h']} px header" if m["header_h"] > 0 else ""
+        clip_count = len(self.files)
+        self.resolution_info_label.setText(
+            f"Clips: {clip_count}   |   Final output: {m['canvas_w']}x{m['canvas_h']}   |   "
+            f"Each video tile: {m['tile_w']}x{m['tile_h']}{header_text}"
+        )
+
     def process_video(self):
         if not self.files:
             return
@@ -244,27 +306,18 @@ class VideoTool(QMainWindow):
         self.start_btn.setEnabled(False)
         self.log_area.setText("Encoding...")
 
-        aspect_map = {
-            "9:16 (Portrait)": (9, 16),
-            "4:5 (Portrait)": (4, 5),
-            "1376:1760 (Old)": (1376, 1760),
-        }
-
-        target_h = self.force_even(self.res_combo.currentText())
+        metrics = self.get_layout_metrics()
         num = len(self.files)
-        mode = self.layout_combo.currentText()
-        rows = 1 if mode == "Single Row" else math.ceil(num / 2)
-        cols_per_row = num if mode == "Single Row" else 2
-
-        tile_h = self.force_even(target_h / rows)
-        ar_w, ar_h = aspect_map[self.aspect_combo.currentText()]
-        tile_w = self.force_even(tile_h * (ar_w / ar_h))
+        rows = metrics["rows"]
+        cols_per_row = metrics["cols_per_row"]
+        tile_h = metrics["tile_h"]
+        tile_w = metrics["tile_w"]
+        header_h = metrics["header_h"]
+        box_h = metrics["box_h"]
 
         font_size = self.font_spin.value()
         fit_mode = self.fit_combo.currentText()
         text_mode = self.text_mode_combo.currentText()
-        header_h = self.force_even(max(font_size * 2 + 20, 36)) if text_mode == "Top of Video" else 0
-        box_h = tile_h + header_h
 
         inputs = ""
         filters = []
