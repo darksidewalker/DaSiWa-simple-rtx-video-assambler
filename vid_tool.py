@@ -1,12 +1,32 @@
-import sys, os, subprocess, math, textwrap
+import sys, os, subprocess, math, textwrap, shutil, shlex
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QPushButton, QListWidget, QComboBox,
     QLabel, QFileDialog, QTextEdit, QSpinBox
 )
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices, QTextCursor
+from PySide6.QtCore import QUrl, QProcess, QElapsedTimer
+
+
+def _resolve_binary(name):
+    """Return the path to ffmpeg/ffprobe, preferring an override env var, then a
+    system path that contains NVENC (Arch/CachyOS), then whatever is on PATH.
+
+    On Linuxbrew systems the brew copy may shadow the system one even though only
+    the system build has NVENC. Prefer /usr/bin/<name> when it exists."""
+    env_key = f"{name.upper()}_BIN"
+    if os.environ.get(env_key):
+        return os.environ[env_key]
+    system_path = f"/usr/bin/{name}"
+    if os.path.exists(system_path):
+        return system_path
+    found = shutil.which(name)
+    return found or name
+
+
+FFMPEG_BIN = _resolve_binary("ffmpeg")
+FFPROBE_BIN = _resolve_binary("ffprobe")
 
 
 class VideoTool(QMainWindow):
@@ -18,6 +38,8 @@ class VideoTool(QMainWindow):
         self.files = []
         self.last_cmd = ""
         self.default_dir = str(Path.home() / "Videos")
+        self.ffmpeg_proc = None
+        self.encode_timer = QElapsedTimer()
         self.init_ui()
 
     def init_ui(self):
@@ -119,28 +141,74 @@ class VideoTool(QMainWindow):
         self.font_spin.setValue(22)
         row3.addWidget(self.font_spin)
 
-        row3.addWidget(QLabel("NVENC Preset:"))
+        row3.addWidget(QLabel("Encoder:"))
+        self.encoder_combo = QComboBox()
+        self.encoder_combo.addItems(["av1_nvenc (RTX)", "libsvtav1 (CPU)"])
+        self.encoder_combo.setCurrentText("av1_nvenc (RTX)")
+        row3.addWidget(self.encoder_combo)
+
+        row3.addWidget(QLabel("Preset:"))
         self.preset_combo = QComboBox()
-        self.preset_combo.addItems(["p1", "p2", "p3", "p4", "p5", "p6", "p7"])
-        self.preset_combo.setCurrentText("p6")
+        # Populated dynamically based on encoder choice.
         row3.addWidget(self.preset_combo)
         settings_grid.addLayout(row3)
         layout.addLayout(settings_grid)
+
+        self.encoder_combo.currentTextChanged.connect(self.update_preset_choices)
+        self.update_preset_choices()
+
+        row4 = QHBoxLayout()
+        row4.addWidget(QLabel("Audio:"))
+        self.audio_mode_combo = QComboBox()
+        self.audio_mode_combo.addItems([
+            "Auto (mix all that have sound)",
+            "None (strip audio)",
+            "From specific file",
+        ])
+        self.audio_mode_combo.setCurrentText("Auto (mix all that have sound)")
+        row4.addWidget(self.audio_mode_combo)
+
+        self.audio_source_combo = QComboBox()
+        self.audio_source_combo.setEnabled(False)
+        # Populated from the file list whenever it changes.
+        row4.addWidget(self.audio_source_combo, stretch=1)
+        settings_grid.addLayout(row4)
+
+        self.audio_mode_combo.currentTextChanged.connect(self.update_audio_source_state)
+        self.file_list.model().rowsInserted.connect(lambda *args: self.refresh_audio_source_list())
+        self.file_list.model().rowsRemoved.connect(lambda *args: self.refresh_audio_source_list())
+        self.refresh_audio_source_list()
+        self.update_audio_source_state()
 
         self.resolution_info_label = QLabel("")
         self.resolution_info_label.setStyleSheet("color: #cccccc; padding: 4px 0;")
         self.resolution_info_label.setWordWrap(True)
         layout.addWidget(self.resolution_info_label)
 
+        self.status_banner = QLabel("Idle.")
+        self.status_banner.setStyleSheet(
+            "background-color: #1a1a1a; color: #888888; padding: 8px 12px; "
+            "border-radius: 4px; font-weight: bold;"
+        )
+        layout.addWidget(self.status_banner)
+
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setStyleSheet("background-color: #0a0a0a; color: #00ff41; font-family: 'Courier New';")
         layout.addWidget(self.log_area)
 
+        start_row = QHBoxLayout()
         self.start_btn = QPushButton("START AV1 ENCODE")
         self.start_btn.setStyleSheet("background-color: #76b900; color: black; font-weight: bold; height: 50px;")
         self.start_btn.clicked.connect(self.process_video)
-        layout.addWidget(self.start_btn)
+        start_row.addWidget(self.start_btn, stretch=4)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setStyleSheet("background-color: #441111; color: white; font-weight: bold; height: 50px;")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self.cancel_encode)
+        start_row.addWidget(self.cancel_btn, stretch=1)
+        layout.addLayout(start_row)
 
         action_hbox = QHBoxLayout()
         self.open_folder_btn = QPushButton("Open Folder")
@@ -161,6 +229,10 @@ class VideoTool(QMainWindow):
         self.file_list.model().rowsInserted.connect(lambda *args: self.update_resolution_preview())
         self.file_list.model().rowsRemoved.connect(lambda *args: self.update_resolution_preview())
         self.update_resolution_preview()
+        self.log_area.setText(
+            f"Using ffmpeg:  {FFMPEG_BIN}\nUsing ffprobe: {FFPROBE_BIN}\n"
+            f"(Override with FFMPEG_BIN / FFPROBE_BIN env vars.)"
+        )
 
     def reorder_item(self, direction):
         curr_row = self.file_list.currentRow()
@@ -281,6 +353,35 @@ class VideoTool(QMainWindow):
             "canvas_h": canvas_h,
         }
 
+    def update_preset_choices(self):
+        encoder = self.encoder_combo.currentText()
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        if encoder.startswith("av1_nvenc"):
+            self.preset_combo.addItems(["p1", "p2", "p3", "p4", "p5", "p6", "p7"])
+            self.preset_combo.setCurrentText("p6")
+        else:
+            # libsvtav1: 0 = slowest/best quality, 13 = fastest. 6 is a common balanced default.
+            self.preset_combo.addItems([str(i) for i in range(0, 14)])
+            self.preset_combo.setCurrentText("6")
+        self.preset_combo.blockSignals(False)
+
+    def refresh_audio_source_list(self):
+        # Keep the per-file picker in sync with self.files.
+        prev_index = self.audio_source_combo.currentIndex()
+        self.audio_source_combo.blockSignals(True)
+        self.audio_source_combo.clear()
+        for i, f in enumerate(self.files):
+            self.audio_source_combo.addItem(f"{i + 1}. {os.path.basename(f)}")
+        if 0 <= prev_index < self.audio_source_combo.count():
+            self.audio_source_combo.setCurrentIndex(prev_index)
+        self.audio_source_combo.blockSignals(False)
+
+    def update_audio_source_state(self):
+        self.audio_source_combo.setEnabled(
+            self.audio_mode_combo.currentText() == "From specific file"
+        )
+
     def update_resolution_preview(self):
         m = self.get_layout_metrics()
         header_text = f" + {m['header_h']} px header" if m["header_h"] > 0 else ""
@@ -303,8 +404,14 @@ class VideoTool(QMainWindow):
             return
 
         self.last_output_dir = os.path.dirname(save_path)
+        self.last_output_path = save_path
+        # Reset everything from any previous run.
+        self.open_folder_btn.setVisible(False)
+        self.copy_btn.setVisible(False)
         self.start_btn.setEnabled(False)
-        self.log_area.setText("Encoding...")
+        self.cancel_btn.setEnabled(True)
+        self.log_area.clear()
+        self.set_status("encoding", "Encoding...")
 
         metrics = self.get_layout_metrics()
         num = len(self.files)
@@ -319,11 +426,15 @@ class VideoTool(QMainWindow):
         fit_mode = self.fit_combo.currentText()
         text_mode = self.text_mode_combo.currentText()
 
-        inputs = ""
+        encoder_choice = self.encoder_combo.currentText()
+        use_nvenc = encoder_choice.startswith("av1_nvenc")
+        hwaccel_args = ["-hwaccel", "cuda"] if use_nvenc else []
+
+        input_args = []
         filters = []
 
         for i, f in enumerate(self.files):
-            inputs += f'-hwaccel cuda -i "{f}" '
+            input_args.extend(hwaccel_args + ["-i", f])
             raw_name = os.path.splitext(os.path.basename(f))[0]
             max_text_w = max(tile_w - 30, 80)
             estimated_char_w = max(font_size * 0.60, 1)
@@ -397,24 +508,189 @@ class VideoTool(QMainWindow):
         else:
             f_graph += f";{row_labels[0]}null[outv]"
 
-        self.last_cmd = (
-            f'ffmpeg -y {inputs} -filter_complex "{f_graph}" -map "[outv]" '
-            f'-c:v av1_nvenc -preset {self.preset_combo.currentText()} '
-            f'-cq {self.cq_spin.value()} -b:v 0 -pix_fmt yuv420p "{save_path}"'
+        # Audio: build the audio graph based on the user's selected mode.
+        audio_mode = self.audio_mode_combo.currentText()
+        audio_indices = []
+
+        if audio_mode == "None (strip audio)":
+            pass
+        elif audio_mode == "From specific file":
+            picked = self.audio_source_combo.currentIndex()
+            if 0 <= picked < len(self.files):
+                # Probe just the picked file; if it has no audio, fall through to no-audio output.
+                try:
+                    probe = subprocess.run(
+                        [FFPROBE_BIN, '-v', 'error', '-select_streams', 'a:0',
+                         '-show_entries', 'stream=codec_type', '-of', 'csv=p=0',
+                         self.files[picked]],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    if probe.stdout.strip() == 'audio':
+                        audio_indices = [picked]
+                except Exception:
+                    pass
+        else:
+            # Auto: probe each input, mix tracks from clips that actually have audio.
+            for i, f in enumerate(self.files):
+                try:
+                    probe = subprocess.run(
+                        [FFPROBE_BIN, '-v', 'error', '-select_streams', 'a:0',
+                         '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', f],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    if probe.stdout.strip() == 'audio':
+                        audio_indices.append(i)
+                except Exception:
+                    pass
+
+        audio_args = []
+        if audio_indices:
+            if len(audio_indices) == 1:
+                # Single audio source: just resample/normalize sample rate, no mix.
+                f_graph += f";[{audio_indices[0]}:a]aresample=async=1[outa]"
+            else:
+                a_inputs = "".join(f"[{i}:a]" for i in audio_indices)
+                # amix with normalize=1 (default) avoids clipping by dividing volumes by N.
+                f_graph += (
+                    f";{a_inputs}amix=inputs={len(audio_indices)}:duration=shortest:dropout_transition=0[outa]"
+                )
+            audio_args = ["-map", "[outa]", "-c:a", "libopus", "-b:a", "160k"]
+        else:
+            audio_args = ["-an"]
+
+        if use_nvenc:
+            video_codec_args = [
+                "-c:v", "av1_nvenc",
+                "-preset", self.preset_combo.currentText(),
+                "-cq", str(self.cq_spin.value()),
+                "-b:v", "0",
+            ]
+        else:
+            # libsvtav1 uses -crf and integer presets; range matches our spinbox 1-51 well enough.
+            video_codec_args = [
+                "-c:v", "libsvtav1",
+                "-preset", self.preset_combo.currentText(),
+                "-crf", str(self.cq_spin.value()),
+                "-b:v", "0",
+            ]
+
+        ffmpeg_args = (
+            ["-y"]
+            + input_args
+            + ["-filter_complex", f_graph, "-map", "[outv]"]
+            + audio_args
+            + video_codec_args
+            + ["-pix_fmt", "yuv420p", "-shortest", save_path]
+        )
+        # Human-readable command for the Copy Cmd button and for debugging.
+        self.last_cmd = shlex.join([FFMPEG_BIN] + ffmpeg_args)
+
+        # Launch asynchronously so the GUI stays responsive and stderr streams live.
+        self.ffmpeg_proc = QProcess(self)
+        self.ffmpeg_proc.setProcessChannelMode(QProcess.MergedChannels)
+        self.ffmpeg_proc.readyReadStandardOutput.connect(self.on_ffmpeg_output)
+        self.ffmpeg_proc.finished.connect(self.on_ffmpeg_finished)
+        self.ffmpeg_proc.errorOccurred.connect(self.on_ffmpeg_error)
+        self.encode_timer.start()
+        self.ffmpeg_proc.start(FFMPEG_BIN, ffmpeg_args)
+
+    STATUS_STYLES = {
+        "idle":     ("#1a1a1a", "#888888"),
+        "encoding": ("#3a2c0a", "#ffc24a"),
+        "success":  ("#103a10", "#7fff7f"),
+        "error":    ("#3a1010", "#ff7777"),
+        "canceled": ("#2a2a2a", "#cccccc"),
+    }
+
+    def set_status(self, kind, text):
+        bg, fg = self.STATUS_STYLES.get(kind, self.STATUS_STYLES["idle"])
+        self.status_banner.setText(text)
+        self.status_banner.setStyleSheet(
+            f"background-color: {bg}; color: {fg}; padding: 8px 12px; "
+            f"border-radius: 4px; font-weight: bold;"
         )
 
-        try:
-            result = subprocess.run(self.last_cmd, shell=True, capture_output=True, text=True)
+    def on_ffmpeg_output(self):
+        if not self.ffmpeg_proc:
+            return
+        chunk = bytes(self.ffmpeg_proc.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        if not chunk:
+            return
+        # FFmpeg uses \r to overwrite the progress line; split it out so the log
+        # doesn't drown in repeated lines while still keeping the latest status.
+        self.log_area.moveCursor(QTextCursor.End)
+        self.log_area.insertPlainText(chunk)
+        self.log_area.moveCursor(QTextCursor.End)
+
+        # Keep the banner ticking with elapsed time.
+        elapsed_s = self.encode_timer.elapsed() // 1000
+        mm, ss = divmod(elapsed_s, 60)
+        self.set_status("encoding", f"Encoding... {mm:02d}:{ss:02d} elapsed")
+
+    def on_ffmpeg_finished(self, exit_code, exit_status):
+        if getattr(self, "_user_canceled", False):
+            self._user_canceled = False
+            self.ffmpeg_proc = None
+            return
+        self.start_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        elapsed_s = self.encode_timer.elapsed() // 1000
+        mm, ss = divmod(elapsed_s, 60)
+        elapsed_str = f"{mm:02d}:{ss:02d}"
+
+        if exit_status == QProcess.CrashExit:
+            self.set_status("error", f"FFmpeg crashed after {elapsed_str}.")
+            self.log_area.append("\n--- ENCODE CRASHED ---")
+        elif exit_code == 0:
+            try:
+                size_mb = os.path.getsize(self.last_output_path) / (1024 * 1024)
+                size_str = f" ({size_mb:.1f} MB)"
+            except OSError:
+                size_str = ""
+            fname = os.path.basename(self.last_output_path)
+            self.set_status(
+                "success",
+                f"Done in {elapsed_str}. Saved {fname}{size_str}.",
+            )
+            self.log_area.append(f"\n--- SUCCESS in {elapsed_str} ---")
+            self.open_folder_btn.setVisible(True)
+            self.copy_btn.setVisible(True)
+        else:
+            self.set_status(
+                "error",
+                f"FFmpeg exited with code {exit_code} after {elapsed_str}. See log below.",
+            )
+            self.log_area.append(f"\n--- ERROR (exit code {exit_code}) ---")
+        self.ffmpeg_proc = None
+
+    def on_ffmpeg_error(self, error):
+        # errorOccurred fires for FailedToStart, etc. finished may or may not follow.
+        if error == QProcess.FailedToStart:
+            self.set_status(
+                "error",
+                f"Could not launch ffmpeg. Check that '{FFMPEG_BIN}' exists and is executable.",
+            )
+            self.log_area.append(f"\nFailed to start: {FFMPEG_BIN}")
             self.start_btn.setEnabled(True)
-            if result.returncode == 0:
-                self.log_area.append("\nSUCCESS.")
-                self.open_folder_btn.setVisible(True)
-                self.copy_btn.setVisible(True)
-            else:
-                self.log_area.append(f"\nERROR:\n{result.stderr}")
-        except Exception as e:
-            self.log_area.append(f"\nSystem Error: {str(e)}")
-            self.start_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(False)
+            self.ffmpeg_proc = None
+
+    def cancel_encode(self):
+        if not self.ffmpeg_proc:
+            return
+        self._user_canceled = True
+        self.set_status("canceled", "Canceling...")
+        self.ffmpeg_proc.terminate()
+        # Give it a moment to clean up, then force-kill if it ignores us.
+        if not self.ffmpeg_proc.waitForFinished(2000):
+            self.ffmpeg_proc.kill()
+            self.ffmpeg_proc.waitForFinished(2000)
+        self.set_status("canceled", "Canceled.")
+        self.log_area.append("\n--- CANCELED ---")
+        self.start_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
 
 
 if __name__ == "__main__":
