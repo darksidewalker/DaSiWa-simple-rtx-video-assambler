@@ -87,7 +87,7 @@ class VideoTool(QMainWindow):
         self.res_combo.setCurrentText("1080")
 
         self.layout_combo = QComboBox()
-        self.layout_combo.addItems(["Grid (Max 2 Cols)", "Single Row"])
+        self.layout_combo.addItems(["Grid (Max 2 Cols)", "Single Row", "Single Column"])
         self.layout_combo.setCurrentText("Single Row")
 
         self.aspect_combo = QComboBox()
@@ -324,8 +324,12 @@ class VideoTool(QMainWindow):
         target_h = self.force_even(self.res_combo.currentText())
         num = max(len(self.files), 1)
         mode = self.layout_combo.currentText()
-        rows = 1 if mode == "Single Row" else math.ceil(num / 2)
-        cols_per_row = num if mode == "Single Row" else 2
+        if mode == "Single Row":
+            rows, cols_per_row = 1, num
+        elif mode == "Single Column":
+            rows, cols_per_row = num, 1
+        else:  # Grid (Max 2 Cols)
+            rows, cols_per_row = math.ceil(num / 2), 2
 
         tile_h = self.force_even(target_h / rows)
         ar_w, ar_h = aspect_map[self.aspect_combo.currentText()]
@@ -495,8 +499,11 @@ class VideoTool(QMainWindow):
             count = end - start
             vids = "".join([f"[v{i}]" for i in range(start, end)])
 
-            if count == cols_per_row:
+            if count == cols_per_row and count >= 2:
                 filters.append(f"{vids}hstack=inputs={count}:shortest=1[r{r}]")
+            elif count == 1:
+                # Single tile in this row: just pass through, no hstack (which requires >=2).
+                filters.append(f"{vids}null[r{r}]")
             else:
                 full_row_w = tile_w * cols_per_row
                 filters.append(f"{vids}pad=w={full_row_w}:h={box_h}:x=(ow-iw)/2:y=0:color=black[r{r}]")
