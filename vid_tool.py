@@ -40,6 +40,10 @@ class VideoTool(QMainWindow):
         self.default_dir = str(Path.home() / "Videos")
         self.ffmpeg_proc = None
         self.encode_timer = QElapsedTimer()
+        # Cached aspect ratio (w, h) of the first input, refreshed when the file list
+        # changes. Used by the "Auto (from first input)" tile aspect option.
+        self._auto_aspect = None
+        self._auto_aspect_source = None  # path the cache was built from
         self.init_ui()
 
     def init_ui(self):
@@ -92,11 +96,15 @@ class VideoTool(QMainWindow):
 
         self.aspect_combo = QComboBox()
         self.aspect_combo.addItems([
+            "Auto (from first input)",
+            "16:9 (Landscape)",
+            "4:3 (Landscape)",
+            "1:1 (Square)",
             "9:16 (Portrait)",
             "4:5 (Portrait)",
             "1376:1760 (Old)",
         ])
-        self.aspect_combo.setCurrentText("9:16 (Portrait)")
+        self.aspect_combo.setCurrentText("Auto (from first input)")
 
         row1.addWidget(QLabel("Output Height:"))
         row1.addWidget(self.res_combo)
@@ -226,6 +234,7 @@ class VideoTool(QMainWindow):
         self.aspect_combo.currentTextChanged.connect(self.update_resolution_preview)
         self.text_mode_combo.currentTextChanged.connect(self.update_resolution_preview)
         self.font_spin.valueChanged.connect(self.update_resolution_preview)
+        self.encoder_combo.currentTextChanged.connect(self.update_resolution_preview)
         self.file_list.model().rowsInserted.connect(lambda *args: self.update_resolution_preview())
         self.file_list.model().rowsRemoved.connect(lambda *args: self.update_resolution_preview())
         self.update_resolution_preview()
@@ -314,8 +323,42 @@ class VideoTool(QMainWindow):
         )
         return "\\n".join(wrapped) if wrapped else text
 
+    def refresh_auto_aspect(self):
+        """Probe the first file to capture its native aspect ratio. Cheap (one ffprobe
+        call) and only re-runs when the first file path changes."""
+        if not self.files:
+            self._auto_aspect = None
+            self._auto_aspect_source = None
+            return
+        first = self.files[0]
+        if first == self._auto_aspect_source and self._auto_aspect is not None:
+            return
+        try:
+            probe = subprocess.run(
+                [FFPROBE_BIN, '-v', 'error', '-select_streams', 'v:0',
+                 '-show_entries', 'stream=width,height',
+                 '-of', 'csv=p=0', first],
+                capture_output=True, text=True, timeout=15,
+            )
+            parts = probe.stdout.strip().split(',')
+            if len(parts) >= 2:
+                w = int(parts[0])
+                h = int(parts[1])
+                if w > 0 and h > 0:
+                    self._auto_aspect = (w, h)
+                    self._auto_aspect_source = first
+                    return
+        except Exception:
+            pass
+        # Probe failed; fall back to a sane default so the tool keeps working.
+        self._auto_aspect = None
+        self._auto_aspect_source = first
+
     def get_layout_metrics(self):
         aspect_map = {
+            "16:9 (Landscape)": (16, 9),
+            "4:3 (Landscape)": (4, 3),
+            "1:1 (Square)": (1, 1),
             "9:16 (Portrait)": (9, 16),
             "4:5 (Portrait)": (4, 5),
             "1376:1760 (Old)": (1376, 1760),
@@ -332,7 +375,13 @@ class VideoTool(QMainWindow):
             rows, cols_per_row = math.ceil(num / 2), 2
 
         tile_h = self.force_even(target_h / rows)
-        ar_w, ar_h = aspect_map[self.aspect_combo.currentText()]
+
+        aspect_choice = self.aspect_combo.currentText()
+        if aspect_choice.startswith("Auto"):
+            # Use the first input's native aspect; fall back to 16:9 if we couldn't probe.
+            ar_w, ar_h = self._auto_aspect if self._auto_aspect else (16, 9)
+        else:
+            ar_w, ar_h = aspect_map[aspect_choice]
         tile_w = self.force_even(tile_h * (ar_w / ar_h))
 
         font_size = self.font_spin.value()
@@ -386,17 +435,60 @@ class VideoTool(QMainWindow):
             self.audio_mode_combo.currentText() == "From specific file"
         )
 
+    # NVENC AV1 minimum frame dimensions (NVENC SDK floor; varies slightly by codec
+    # and GPU generation, but 160x64 is a safe lower bound used as the rejected-by-driver line).
+    NVENC_MIN_W = 160
+    NVENC_MIN_H = 64
+
+    def nvenc_dimension_warning(self, canvas_w, canvas_h):
+        """Return a warning string if NVENC is selected and dimensions are too small, else ''."""
+        if not self.encoder_combo.currentText().startswith("av1_nvenc"):
+            return ""
+        if canvas_w < self.NVENC_MIN_W or canvas_h < self.NVENC_MIN_H:
+            return (
+                f" | WARNING: NVENC requires at least {self.NVENC_MIN_W}x{self.NVENC_MIN_H}. "
+                f"Raise Output Height, change Layout, or switch Encoder to libsvtav1 (CPU)."
+            )
+        return ""
+
     def update_resolution_preview(self):
+        self.refresh_auto_aspect()
         m = self.get_layout_metrics()
         header_text = f" + {m['header_h']} px header" if m["header_h"] > 0 else ""
         clip_count = len(self.files)
+        warning = self.nvenc_dimension_warning(m["canvas_w"], m["canvas_h"])
+
+        # Show the resolved aspect when Auto is chosen so the user knows what got detected.
+        aspect_note = ""
+        if self.aspect_combo.currentText().startswith("Auto"):
+            if self._auto_aspect:
+                aspect_note = f"   |   Detected aspect: {self._auto_aspect[0]}x{self._auto_aspect[1]}"
+            elif self.files:
+                aspect_note = "   |   Aspect probe failed, defaulting to 16:9"
+
         self.resolution_info_label.setText(
             f"Clips: {clip_count}   |   Final output: {m['canvas_w']}x{m['canvas_h']}   |   "
-            f"Each video tile: {m['tile_w']}x{m['tile_h']}{header_text}"
+            f"Each video tile: {m['tile_w']}x{m['tile_h']}{header_text}{aspect_note}{warning}"
         )
+        if warning:
+            self.resolution_info_label.setStyleSheet("color: #ff7777; padding: 4px 0; font-weight: bold;")
+        else:
+            self.resolution_info_label.setStyleSheet("color: #cccccc; padding: 4px 0;")
 
     def process_video(self):
         if not self.files:
+            return
+
+        # Pre-flight: catch NVENC minimum-dimension violations before ffmpeg does.
+        pre_metrics = self.get_layout_metrics()
+        warning = self.nvenc_dimension_warning(pre_metrics["canvas_w"], pre_metrics["canvas_h"])
+        if warning:
+            self.set_status(
+                "error",
+                f"Output is {pre_metrics['canvas_w']}x{pre_metrics['canvas_h']}, below NVENC's "
+                f"{self.NVENC_MIN_W}x{self.NVENC_MIN_H} minimum. Raise Output Height, change Layout, "
+                f"or switch Encoder to libsvtav1 (CPU).",
+            )
             return
 
         save_path, _ = QFileDialog.getSaveFileName(
