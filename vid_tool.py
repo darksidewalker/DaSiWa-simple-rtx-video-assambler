@@ -475,6 +475,17 @@ class VideoTool(QMainWindow):
         else:
             self.resolution_info_label.setStyleSheet("color: #cccccc; padding: 4px 0;")
 
+    def generate_filler_inputs(self, num_needed, tile_w, tile_h, fps):
+        """Generate lavfi color filter strings for synthetic black video inputs.
+
+        Returns list of (filter_graph_entry, stream_tag) tuples ready to append to filters."""
+        entries = []
+        for i in range(num_needed):
+            tag = f"[filler{i}]"
+            entry = f"color=c=black:s={tile_w}x{tile_h}:r={fps}:t=static{tag}"
+            entries.append((entry, tag))
+        return entries
+
     def process_video(self):
         if not self.files:
             return
@@ -521,6 +532,44 @@ class VideoTool(QMainWindow):
         font_size = self.font_spin.value()
         fit_mode = self.fit_combo.currentText()
         text_mode = self.text_mode_combo.currentText()
+
+        # Detect odd-grid scenario: in Grid mode with odd count, the last row has
+        # fewer tiles than cols_per_row. We need to synthesize black filler frames
+        # for missing slots so hstack can work on every row consistently.
+        mode = self.layout_combo.currentText()
+        grid_fill_needed = False
+        if mode == "Grid (Max 2 Cols)" and num % 2 != 0 and num > 1:
+            grid_fill_needed = True
+
+        # For grid fillers we need the duration & fps of the first video.
+        filler_duration_s = 0.0
+        filler_fps = 25.0  # safe default
+        if grid_fill_needed and self.files:
+            try:
+                probe = subprocess.run(
+                    [FFPROBE_BIN, "-v", "error",
+                     "-select_streams", "v:0",
+                     "-show_entries", "stream=width,height,r_frame_rate,duration",
+                     "-of", "csv=p=0", self.files[0]],
+                    capture_output=True, text=True, timeout=15,
+                )
+                parts = probe.stdout.strip().split(",")
+                if len(parts) >= 4:
+                    w_p = int(parts[0])
+                    h_p = int(parts[1])
+                    fps_str = parts[2]
+                    dur_str = parts[3]
+                    if w_p > 0 and h_p > 0:
+                        # Parse fps like "30/1" or "29.97"
+                        if "/" in fps_str:
+                            n, d = fps_str.split("/")
+                            filler_fps = float(n) / float(d) if float(d) != 0 else 25.0
+                        else:
+                            filler_fps = float(fps_str) if fps_str else 25.0
+                        filler_duration_s = float(dur_str) if dur_str else 5.0
+            except Exception:
+                filler_duration_s = 5.0
+                filler_fps = 25.0
 
         encoder_choice = self.encoder_combo.currentText()
         use_nvenc = encoder_choice.startswith("av1_nvenc")
@@ -584,10 +633,32 @@ class VideoTool(QMainWindow):
 
             filters.append(base + f"[v{i}]")
 
+        # Add synthetic black fillers for incomplete grid rows.
+        filler_count = 0
+        if grid_fill_needed:
+            # Last row needs exactly cols_per_row items total; figure out
+            # how many are actually present there.
+            last_row_start = (rows - 1) * cols_per_row
+            filler_count = min(cols_per_row, cols_per_row - (num - last_row_start))
+            # Cap at 1 filler max (grid has max 2 cols, so at most 1 missing slot).
+            filler_count = min(filler_count, 1)
+
+        effective_num = num + filler_count
+        for fi in range(filler_count):
+            idx = num + fi
+            nframes = int(round(filler_duration_s * filler_fps))
+            base = (
+                f"color=c=black:s={tile_w}x{tile_h}:d={nframes}:r={filler_fps},"
+                f"setsar=1,pad={tile_w}:{tile_h}:(ow-iw)/2:(oh-ih)/2:color=black[v{idx}]"
+            )
+            if header_h > 0:
+                base += f",pad={tile_w}:{box_h}:0:{header_h}:color=black"
+            filters.append(base)
+
         row_labels = []
         for r in range(rows):
             start = r * cols_per_row
-            end = min((r + 1) * cols_per_row, num)
+            end = min((r + 1) * cols_per_row, effective_num)
             count = end - start
             vids = "".join([f"[v{i}]" for i in range(start, end)])
 
