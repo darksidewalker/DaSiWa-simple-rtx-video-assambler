@@ -19,7 +19,7 @@ A powerful Qt-based desktop application for creating side-by-side or grid compar
 
 ## 📸 Preview
 
-![App Preview](assets/app-preview.webp)
+![App Preview](assets/app-screenshot.webp)
 
 ## 🚀 Quick Start
 
