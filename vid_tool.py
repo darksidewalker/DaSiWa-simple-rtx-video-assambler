@@ -365,10 +365,14 @@ class VideoTool(QMainWindow):
 
         self.text_mode_combo = QComboBox()
         self.text_mode_combo.addItems([
-            "Inside Video",
-            "Top of Video",
+            "Top Left",
+            "Top Center",
+            "Top Right",
+            "Bottom Left",
+            "Bottom Center",
+            "Bottom Right",
         ])
-        self.text_mode_combo.setCurrentText("Inside Video")
+        self.text_mode_combo.setCurrentText("Top Left")
 
         row2.addWidget(QLabel("Fit Mode:"))
         row2.addWidget(self.fit_combo)
@@ -764,13 +768,21 @@ class VideoTool(QMainWindow):
                     .replace("'", "\\'")
                     .replace(",", "\\,")
                 )
-                if "top" in self.text_mode_combo.currentText().lower():
-                    y_pos = "10"
+                mode = self.text_mode_combo.currentText().lower()
+                if "bottom" in mode:
+                    y_expr = "h-th-10"
+                elif "center" in mode:
+                    y_expr = "(h-th)/2"
                 else:
-                    y_pos = "h-th-10"
+                    y_expr = "10"
+                if "right" in mode:
+                    x_expr = "w-tw-10"
+                elif "left" in mode:
+                    x_expr = "10"
+                else:
+                    x_expr = "(w-tw)/2"
                 chain += (
-                    f",drawtext=text='{escaped}':fontsize={self.font_spin.value()}:"
-                    f"fontcolor=white:borderw=2:bordercolor=black:x=(w-text_w)/2:y={y_pos}"
+                    f",drawtext=text='{escaped}':fontsize={self.font_spin.value()}:fontcolor=white:borderw=2:bordercolor=black:x={x_expr}:y={y_expr}"
                 )
 
             label = f"v{i}"
