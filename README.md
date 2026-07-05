@@ -8,8 +8,8 @@ A specialized tool for creating side-by-side or grid comparisons using NVENC AV1
 3. **Right-click** `setup_and_run.ps1` and select **"Run with PowerShell"**.
 
 ## 🛠 How to Use
-1. **Add Videos:** Drag and drop your `.webm` or `.mp4` files directly into the list, or use the "Add Manually" button.
-2. **Reorder:** Select a file in the list and use "Move Up" or "Move Down" to set the left-to-right/top-to-bottom sequence.
+1. **Add Videos:** Drag and drop your `.webm` or `.mp4` files into the drop field, or use the "Add Manually" button.
+2. **Reorder/Remove:** Drag videos inside the list to change the sequence; use the ✕ button on a row to remove it.
 3. **Configure:** - **Height:** Select the total vertical resolution (e.g., 1080).
    - **Layout:** Choose "Single Row" for a wide horizontal strip or "Grid" for a 2-column stack.
    - **Quality (CQ):** 30 is balanced; lower (e.g., 20) is higher quality/larger file.
