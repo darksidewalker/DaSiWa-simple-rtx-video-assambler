@@ -598,31 +598,33 @@ class VideoTool(QMainWindow):
             return
 
         try:
-            heights = []
-            widths = []
-            for fp in self.files[:4]:  # Check first 4 at most
-                cmd = [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
-                       "-show_entries", "stream=width,height", "-of", "csv=p=0", fp]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-                if result.returncode == 0 and result.stdout.strip():
-                    parts = result.stdout.strip().split(",")
-                    if len(parts) == 2:
-                        widths.append(int(parts[0]))
-                        heights.append(int(parts[1]))
+            if not self.files:
+                self.resolution_info_label.setText("Keine Videos geladen.")
+                return
 
-            if not heights:
+            # Use ONLY the first video for aspect calculation
+            fp = self.files[0]
+            cmd = [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
+                   "-show_entries", "stream=width,height", "-of", "csv=p=0", fp]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode != 0 or not result.stdout.strip():
                 self.resolution_info_label.setText("Auflösung nicht ermittelbar.")
                 return
 
-            avg_w = sum(widths) // len(widths)
-            avg_h = sum(heights) // len(heights)
+            parts = result.stdout.strip().split(",")
+            if len(parts) != 2:
+                self.resolution_info_label.setText("Auflösung nicht ermittelbar.")
+                return
+
+            src_w = int(parts[0])
+            src_h = int(parts[1])
 
             out_h = int(self.res_combo.currentText())
             aspect = self.aspect_combo.currentText()
 
             # Calculate output width based on aspect ratio
             if aspect.startswith("Auto"):
-                out_w = round(avg_w * out_h / avg_h)
+                out_w = round(src_w * out_h / src_h)
             elif aspect.startswith("16:9"):
                 out_w = round(out_h * 16 / 9)
             elif aspect.startswith("4:3"):
@@ -636,7 +638,7 @@ class VideoTool(QMainWindow):
             elif aspect.startswith("1376"):
                 out_w = round(out_h * 1376 / 1760)
             else:
-                out_w = avg_w
+                out_w = round(out_h * 16 / 9)  # Default to 16:9
 
             n = len(self.files)
             cols = 2 if "Grid" in self.layout_combo.currentText() else 1
@@ -646,7 +648,7 @@ class VideoTool(QMainWindow):
             final_h = out_h * rows
 
             self.resolution_info_label.setText(
-                f"{n} Video(s), je {avg_w}x{avg_h}px → "
+                f"{n} Video(s), je {src_w}x{src_h}px → "
                 f"Ausgabe: {final_w}x{final_h}px @ {out_h}p"
             )
         except Exception as e:
@@ -673,7 +675,21 @@ class VideoTool(QMainWindow):
 
         # Determine tile width from the selected aspect ratio.
         aspect = self.aspect_combo.currentText()
-        if aspect.startswith("16:9"):
+        if aspect.startswith("Auto"):
+            # Probe first input for native aspect ratio
+            cmd = [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
+                   "-show_entries", "stream=width,height", "-of", "csv=p=0", self.files[0]]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split(",")
+                if len(parts) == 2:
+                    src_w, src_h = int(parts[0]), int(parts[1])
+                    out_w = round(src_w * out_h / src_h)
+                else:
+                    out_w = round(out_h * 16 / 9)
+            else:
+                out_w = round(out_h * 16 / 9)
+        elif aspect.startswith("16:9"):
             out_w = round(out_h * 16 / 9)
         elif aspect.startswith("4:3"):
             out_w = round(out_h * 4 / 3)
@@ -793,15 +809,36 @@ class VideoTool(QMainWindow):
         if n == 1:
             filter_parts.append(f"{video_labels[0]}null[vout]")
         elif "Grid" in layout_mode:
-            positions = []
-            for i in range(n):
-                x = "0" if i % 2 == 0 else "w0"
-                row = i // 2
-                y = "0" if row == 0 else "+".join("h0" for _ in range(row))
-                positions.append(f"{x}_{y}")
-            filter_parts.append(
-                f"{''.join(video_labels)}xstack=inputs={n}:layout={'|'.join(positions)}:fill=black[vout]"
-            )
+            # Build grid using hstack per row, then vstack rows
+            # Each row must have same height for vstack compatibility
+            
+            cols = 2
+            full_w = out_w * cols
+            total_rows = math.ceil(n / cols)
+            
+            # Process each row separately
+            row_streams = []
+            for r in range(total_rows):
+                start_idx = r * cols
+                end_idx = min(start_idx + cols, n)
+                row_videos = video_labels[start_idx:end_idx]
+                
+                if len(row_videos) == 1:
+                    # Single video in row - pad to full width
+                    row_label = f"row{r}"
+                    filter_parts.append(f"{row_videos[0]}pad={full_w}:{out_h}:0:0:black[{row_label}]")
+                    row_streams.append(f"[{row_label}]")
+                else:
+                    # Multiple videos in row - hstack them
+                    row_label = f"row{r}"
+                    filter_parts.append(f"{''.join(row_videos)}hstack=inputs={len(row_videos)}[{row_label}]")
+                    row_streams.append(f"[{row_label}]")
+            
+            # Stack all rows vertically
+            if len(row_streams) == 1:
+                filter_parts.append(f"{row_streams[0]}null[vout]")
+            else:
+                filter_parts.append(f"{''.join(row_streams)}vstack=inputs={len(row_streams)}[vout]")
         elif "Single Row" in layout_mode:
             filter_parts.append(f"{''.join(video_labels)}hstack=inputs={n}[vout]")
         else:
