@@ -27,6 +27,11 @@ FFMPEG_BIN = _resolve_binary("ffmpeg")
 FFPROBE_BIN = _resolve_binary("ffprobe")
 
 
+def _even_dimension(value):
+    """Return a positive even video dimension for yuv420p/NVENC filters."""
+    return max(2, int(round(value)) // 2 * 2)
+
+
 class VideoRow(QWidget):
     """Single row: drag handle | filename label | custom text field | remove button."""
 
@@ -451,6 +456,12 @@ class VideoTool(QMainWindow):
         self.start_btn.clicked.connect(self.process_video)
         start_row.addWidget(self.start_btn, stretch=4)
 
+        self.open_folder_btn = QPushButton("Output")
+        self.open_folder_btn.setToolTip("Open output folder")
+        self.open_folder_btn.setStyleSheet("background-color: #222222; color: #dddddd; font-weight: bold; height: 50px;")
+        self.open_folder_btn.clicked.connect(self.open_output_folder)
+        start_row.addWidget(self.open_folder_btn, stretch=1)
+
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setStyleSheet("background-color: #441111; color: white; font-weight: bold; height: 50px;")
         self.cancel_btn.setEnabled(False)
@@ -459,13 +470,9 @@ class VideoTool(QMainWindow):
         layout.addLayout(start_row)
 
         action_hbox = QHBoxLayout()
-        self.open_folder_btn = QPushButton("Open Folder")
-        self.open_folder_btn.setVisible(False)
-        self.open_folder_btn.clicked.connect(self.open_output_folder)
         self.copy_btn = QPushButton("Copy Cmd")
         self.copy_btn.setVisible(False)
         self.copy_btn.clicked.connect(self.copy_command)
-        action_hbox.addWidget(self.open_folder_btn)
         action_hbox.addWidget(self.copy_btn)
         layout.addLayout(action_hbox)
 
@@ -640,6 +647,9 @@ class VideoTool(QMainWindow):
             else:
                 out_w = round(out_h * 16 / 9)  # Default to 16:9
 
+            out_h = _even_dimension(out_h)
+            out_w = _even_dimension(out_w)
+
             n = len(self.files)
             cols = 2 if "Grid" in self.layout_combo.currentText() else 1
             rows = math.ceil(n / cols)
@@ -671,7 +681,7 @@ class VideoTool(QMainWindow):
 
         # Determine layout dimensions
         n = len(self.files)
-        out_h = int(self.res_combo.currentText())
+        out_h = _even_dimension(int(self.res_combo.currentText()))
 
         # Determine tile width from the selected aspect ratio.
         aspect = self.aspect_combo.currentText()
@@ -703,6 +713,8 @@ class VideoTool(QMainWindow):
             out_w = round(out_h * 1376 / 1760)
         else:
             out_w = round(out_h * 16 / 9)
+
+        out_w = _even_dimension(out_w)
 
         # Add text overlay if any video has custom text
         text_overlays = []
@@ -765,14 +777,14 @@ class VideoTool(QMainWindow):
         for i in range(n):
             if "cover" in fit_mode:
                 chain = (
-                    f"[{i}:v:0]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+                    f"[{i}:v:0]scale={out_w}:{out_h}:force_original_aspect_ratio=increase:force_divisible_by=2,"
                     f"crop={out_w}:{out_h}"
                 )
             elif "stretch" in fit_mode:
                 chain = f"[{i}:v:0]scale={out_w}:{out_h}"
             else:
                 chain = (
-                    f"[{i}:v:0]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                    f"[{i}:v:0]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                     f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2"
                 )
 
@@ -919,6 +931,7 @@ class VideoTool(QMainWindow):
     def open_output_folder(self):
         """Open the output folder in the system file manager."""
         output_dir = Path.home() / "Videos" / "rve-output"
+        output_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_dir)))
 
     def copy_command(self):
